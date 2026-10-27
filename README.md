@@ -105,20 +105,6 @@ una y la muestra una sola vez en la terminal. Cámbiala después en **Mi cuenta*
 Para levantar todo con Docker (API incluida): `docker compose --profile completo up -d --build`.
 Si el puerto 5432 está ocupado, crea un `.env` en la raíz con `DB_PUERTO=5434` y usa ese puerto en `apps/api/.env`.
 
-## Datos privados
-
-El historial del Excel (842 cotizaciones) y los casos de prueba "golden" tienen **clientes, costos, márgenes y
-precios reales** de Kromatica. Por eso viven en un repositorio **privado** aparte,
-`KROMATICA-S.A.S-COTIZACIONES-datos`, que se clona en la carpeta `datos-privados/` (está en el `.gitignore`).
-
-| | Con `datos-privados/` | Sin `datos-privados/` |
-|---|---|---|
-| `pnpm db:seed` | Importa las 842 cotizaciones históricas | Solo catálogos, parámetros y administrador |
-| Sugerencias de MO min y troquelada | Comparan con el historial | Sin historial no tienen con qué comparar |
-| Pruebas golden y de precisión | Corren | Se saltan |
-
-Una instalación para Kromatica necesita los datos antes del seed. Después el historial vive en la base de datos,
-así que lo importante es respaldarla. Los modelos entrenados de la fase 2 también son privados (`ml/README.md`).
 
 ## Pruebas
 
