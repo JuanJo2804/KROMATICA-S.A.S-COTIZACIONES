@@ -1,0 +1,36 @@
+# Desarrollo: solo la base de datos.        docker compose up -d db
+# Todo el sistema (API incluida):           docker compose --profile completo up -d --build
+# Si el 5432 ya está ocupado (p. ej. un PostgreSQL local), define DB_PUERTO en un .env junto a este
+# archivo (DB_PUERTO=5434) y usa ese mismo puerto en apps/api/.env.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: cotiz
+      POSTGRES_PASSWORD: cotiz
+      POSTGRES_DB: cotizaciones
+    ports:
+      - "${DB_PUERTO:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cotiz -d cotizaciones"]
+      interval: 5s
+      retries: 10
+
+  api:
+    profiles: ["completo"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://cotiz:cotiz@db:5432/cotizaciones
+      PORT: 4000
+    ports:
+      - "4000:4000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

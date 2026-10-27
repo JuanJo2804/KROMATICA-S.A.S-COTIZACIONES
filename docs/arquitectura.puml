@@ -1,0 +1,76 @@
+@startuml Despliegue_Kromatica_Cotizaciones
+skinparam backgroundColor #FAFAFA
+skinparam node {
+  BackgroundColor #F2F0F0
+  BorderColor #333333
+}
+skinparam artifact {
+  BackgroundColor #FFFFFF
+  BorderColor #333333
+}
+skinparam component {
+  BackgroundColor #FFFFFF
+  BorderColor #333333
+}
+skinparam database {
+  BackgroundColor #FFFFFF
+  BorderColor #333333
+}
+skinparam ArrowColor #333333
+
+node "<<device>>\nPC del usuario\n(comercial / producción)" as Device {
+  node "<<executionEnvironment>>\nNavegador web" as Browser {
+    artifact "<<artifact>>\nApp web (JS/CSS)" as Bundle
+  }
+}
+
+node "<<node>>\nServidor (VPS / on-premise)\nLinux + Docker Compose" as Server {
+
+  node "<<container>>\nproxy" as ProxyC {
+    artifact "<<artifact>>\nnginx.conf\n(HTTPS / reverse proxy)" as Nginx
+  }
+
+  node "<<container>>\nweb (Node.js 22)" as FrontC {
+    artifact "<<artifact>>\n.next/ (Next.js + Tailwind)" as NextBuild
+    component "<<component>>\nInterfaz de cotizaciones" as UI
+    NextBuild ..> UI : <<manifest>>
+  }
+
+  node "<<container>>\napi (Node.js 22)" as ApiC {
+    artifact "<<artifact>>\ndist/main.js (NestJS)" as NestDist
+    artifact "<<artifact>>\n@kromatica/motor-calculo" as Motor
+    component "<<component>>\nGestión de cotizaciones\ny parámetros" as Gestion
+    component "<<component>>\nMotor de cálculo" as Calc
+    component "<<component>>\nSugerencia de MO min\n(vecinos cercanos)" as Similar
+    NestDist ..> Gestion : <<manifest>>
+    Motor ..> Calc : <<manifest>>
+    interface "REST /api" as IRest
+    Gestion - IRest
+    Gestion ..> Calc
+    Gestion ..> Similar
+  }
+
+  node "<<container>>\ndb (PostgreSQL 16)" as DbC {
+    database "<<artifact>>\nBD cotizaciones\n(cotizaciones, parámetros con vigencia,\ncatálogos, historial del Excel)" as DB
+  }
+
+  node "<<container>>\nml-service (fase 2)\n(Python + FastAPI)" as MlC #EDEDED {
+    artifact "<<artifact>>\nmodelo_vN.pkl" as Model
+    component "<<component>>\nPredicción de MO min" as Predict
+    Model ..> Predict : <<use>>
+  }
+}
+
+artifact "<<artifact>>\nmigraciones Prisma" as Migrations
+artifact "<<artifact>>\nseed: catálogos, parámetros,\nhistorial del Excel" as Seed
+
+Device -- ProxyC : HTTPS 443
+ProxyC -- FrontC : HTTP 3000
+ProxyC -- ApiC : HTTP 4000 (/api)
+ApiC -- DbC : TCP 5432 (Prisma + adapter-pg)
+ApiC -- MlC : HTTP interno\n(timeout 2 s, opcional)
+MlC -- DbC : TCP 5432 (lectura)
+
+Migrations ..> DbC : <<deploy>>
+Seed ..> DbC : <<deploy>>
+@enduml

@@ -1,0 +1,340 @@
+// Modelo de datos del sistema de cotizaciones de Kromatica.
+//
+// Principios:
+//  1. Los valores que cambian con el tiempo (valor del minuto, horas por día…) son
+//     PARÁMETROS con fecha de vigencia, nunca constantes en el código.
+//  2. Cada cotización guarda una COPIA (snapshot) de los valores con que se calculó,
+//     para que el historial no cambie cuando suba un precio.
+//  3. Los datos que alimentan el modelo de predicción (tintas, montaje, tamaño, MO min,
+//     tiempo real) son campos estructurados, no texto libre.
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "esm"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ───────────────────────────── Usuarios ─────────────────────────────
+
+/// Persona que usa el sistema. ADMIN además cambia los parámetros globales, elimina cotizaciones y administra
+/// usuarios; OPERARIO hace todo lo demás. No se borran: se desactivan (activo = false).
+model Usuario {
+  id        Int      @id @default(autoincrement())
+  usuario   String   @unique // para iniciar sesión, en minúsculas
+  nombre    String
+  claveHash String // "scrypt$<sal>$<hash>" (ver src/auth/claves.ts)
+  rol       Rol      @default(OPERARIO)
+  activo    Boolean  @default(true)
+  creadoEn  DateTime @default(now())
+
+  sesiones            Sesion[]
+  cotizacionesCreadas Cotizacion[]   @relation("CreadaPor")
+  cambiosDeEstado     CambioEstado[]
+  parametros          Parametro[]
+}
+
+/// Sesión iniciada. La cookie lleva un token aleatorio; aquí solo se guarda su SHA-256.
+model Sesion {
+  id        Int      @id @default(autoincrement())
+  tokenHash String   @unique
+  usuarioId Int
+  usuario   Usuario  @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  creadaEn  DateTime @default(now())
+  expiraEn  DateTime
+
+  @@index([usuarioId])
+}
+
+// ───────────────────────────── Catálogos ─────────────────────────────
+
+model Cliente {
+  id           Int          @id @default(autoincrement())
+  nombre       String
+  nit          String?      @unique
+  telefono     String?
+  correo       String?
+  creadoEn     DateTime     @default(now())
+  cotizaciones Cotizacion[]
+
+  @@index([nombre])
+}
+
+/// Llavero, manilla, portavaso… Es una tabla para poder agregar productos sin tocar el código.
+model TipoProducto {
+  id           Int          @id @default(autoincrement())
+  codigo       String       @unique
+  nombre       String
+  activo       Boolean      @default(true)
+  cotizaciones Cotizacion[]
+}
+
+/// Renglones de la plantilla del Excel (hierro, cordón, bolsa individual, samblasted…) con su valor sugerido.
+/// El formulario muestra todos los activos como campos; para quitar uno del formulario se marca `activo = false`.
+model ConceptoCatalogo {
+  id            Int             @id @default(autoincrement())
+  codigo        String          @unique
+  nombre        String
+  seccion       SeccionConcepto
+  tipoCosto     TipoCosto
+  valorSugerido Decimal?        @db.Decimal(14, 4)
+  orden         Int             @default(0) // orden dentro de la sección, como en el Excel
+  activo        Boolean         @default(true)
+}
+
+/// Tabla de gramos por cm² según el espesor ("TABLA DE GRAMOS POR CM²" del Excel): se pesa una muestra de
+/// `cm2` cm² y da `gramos`; gramosPorCm2 = gramos / cm2.
+model EspesorMaterial {
+  id           Int      @id @default(autoincrement())
+  nombre       String   @unique // "0,8 mm", "1 mm", "pin", "portavasos"…
+  gramos       Decimal? @db.Decimal(10, 2)
+  cm2          Decimal? @db.Decimal(10, 2)
+  gramosPorCm2 Decimal  @db.Decimal(10, 6)
+  orden        Int      @default(0)
+  activo       Boolean  @default(true)
+}
+
+// ───────────────────────────── Parámetros ─────────────────────────────
+
+/// Valor de un parámetro global con fecha de vigencia. El valor vigente para una
+/// fecha es el registro con la mayor `vigenteDesde` <= esa fecha.
+model Parametro {
+  id           Int            @id @default(autoincrement())
+  clave        ClaveParametro
+  valor        Decimal        @db.Decimal(14, 4)
+  vigenteDesde DateTime       @db.Date
+  nota         String?
+  creadoEn     DateTime       @default(now())
+  creadoPorId  Int?
+  creadoPor    Usuario?       @relation(fields: [creadoPorId], references: [id], onDelete: SetNull)
+
+  @@unique([clave, vigenteDesde])
+}
+
+/// Porcentajes por defecto (CIF, administración, márgenes sugeridos). La persona puede
+/// cambiarlos en cada cotización; esto solo es el punto de partida.
+model PoliticaPrecios {
+  id                       Int         @id @default(autoincrement())
+  nombre                   String      @unique
+  cifPorcentajes           Decimal[]   @db.Decimal(6, 4)
+  cifBase                  BaseCalculo @default(PRIMERA_FILA)
+  administracionPorcentaje Decimal     @db.Decimal(6, 4)
+  administracionBase       BaseCalculo @default(PRIMERA_FILA)
+  margenesSugeridos        Decimal[]   @db.Decimal(6, 4)
+  redondeo                 Int         @default(10)
+  predeterminada           Boolean     @default(false)
+  activa                   Boolean     @default(true)
+}
+
+// ───────────────────────────── Cotización ─────────────────────────────
+
+model Cotizacion {
+  id          Int              @id @default(autoincrement())
+  consecutivo Int              @unique @default(autoincrement())
+  origen      OrigenCotizacion @default(SISTEMA)
+  hojaExcel   String? // nombre de la hoja cuando se importó del Excel
+  estado      EstadoCotizacion @default(BORRADOR)
+
+  clienteId      Int?
+  cliente        Cliente?      @relation(fields: [clienteId], references: [id])
+  tipoProductoId Int?
+  tipoProducto   TipoProducto? @relation(fields: [tipoProductoId], references: [id])
+
+  referencia  String? // "REF-001", "llavero logo"…
+  descripcion String? // texto para el cliente: "Aplique en PVC, base más un color"
+  /// En las importadas del Excel se infiere: TROQUELADO si la hoja tiene costo de troquel, BISTURI si no.
+  tipoCorte   TipoCorte?
+
+  // ── Características del producto (entradas de los modelos de predicción) ──
+  anchoCm      Decimal? @db.Decimal(8, 2)
+  altoCm       Decimal? @db.Decimal(8, 2)
+  tintas       Int?
+  montaje      Int // unidades por plancha
+  espesor      String?
+  /// Gramos por cm² del espesor. En las importadas se estima como gramos por clisé ÷ cm² del clisé.
+  gramosPorCm2 Decimal? @db.Decimal(10, 6)
+
+  // ── Troquelada ──
+  troqueladasPorHora         Decimal? @db.Decimal(10, 2) // dato de la operaria o sugerido; da el $ por unidad
+  troqueladasPorHoraSugerida Decimal? @db.Decimal(10, 2) // lo que sugirió el sistema (para medir su precisión)
+
+  // ── Tiempo de producción ──
+  moMin         Decimal      @db.Decimal(8, 2) // minutos por plancha usados en el cálculo
+  moMinFuente   FuenteTiempo @default(OPERARIA)
+  moMinSugerido Decimal?     @db.Decimal(8, 2) // lo que sugirió el sistema (para medir su precisión)
+  moMinReal     Decimal?     @db.Decimal(8, 2) // se registra al terminar la producción
+
+  // ── Snapshot de parámetros usados ──
+  valorMinuto              Decimal     @db.Decimal(10, 2)
+  horasPorDia              Decimal     @db.Decimal(5, 2)
+  gramosPorClise           Decimal     @default(0) @db.Decimal(10, 3)
+  precioGramo              Decimal     @default(0) @db.Decimal(10, 3)
+  cifBase                  BaseCalculo @default(PRIMERA_FILA)
+  administracionPorcentaje Decimal     @db.Decimal(6, 4)
+  administracionBase       BaseCalculo @default(PRIMERA_FILA)
+  redondeo                 Int         @default(10)
+
+  /// Datos completos con que se calculó (ítems de armada, empaque…) para poder reabrir y editar la cotización.
+  entrada       Json?
+  observaciones String?
+  /// Líneas del PDF para el cliente, una por renglón. null = se arman con la descripción y el tamaño.
+  textoCliente  String?
+  /// Fecha de la cotización. En las importadas, la más reciente de la hoja (null si la hoja no tenía fecha).
+  /// `creadaEn` es cuándo entró al sistema.
+  fecha         DateTime? @db.Date
+  creadaEn      DateTime  @default(now())
+  actualizadaEn DateTime  @updatedAt
+  creadaPorId   Int?
+  creadaPor     Usuario?  @relation("CreadaPor", fields: [creadaPorId], references: [id], onDelete: SetNull)
+
+  conceptos  CotizacionConcepto[]
+  cantidades CotizacionCantidad[]
+  margenes   CotizacionMargen[]
+  historial  CambioEstado[]
+  imagen     ImagenCotizacion?
+
+  @@index([estado])
+  @@index([creadaEn])
+  @@index([fecha])
+  @@index([tipoProductoId, tintas, montaje])
+}
+
+/// Conceptos de costo de la cotización. Costo por unidad = porUnidad + fijo / cantidad.
+model CotizacionConcepto {
+  id           Int             @id @default(autoincrement())
+  cotizacionId Int
+  cotizacion   Cotizacion      @relation(fields: [cotizacionId], references: [id], onDelete: Cascade)
+  orden        Int
+  seccion      SeccionConcepto
+  codigo       String
+  nombre       String
+  porUnidad    Decimal         @default(0) @db.Decimal(14, 4)
+  fijo         Decimal         @default(0) @db.Decimal(14, 2)
+
+  @@index([cotizacionId])
+}
+
+/// Opciones de margen que se le mostraron a la persona (ej. 35 %, 30 %, 25 %, 20 %).
+model CotizacionMargen {
+  id           Int        @id @default(autoincrement())
+  cotizacionId Int
+  cotizacion   Cotizacion @relation(fields: [cotizacionId], references: [id], onDelete: Cascade)
+  orden        Int
+  valor        Decimal    @db.Decimal(6, 4)
+  sobreOrden   Int? // null = sobre el costo; n = sobre el precio del margen n
+
+  @@unique([cotizacionId, orden])
+}
+
+/// Una fila de la tabla de precios: costos calculados (snapshot) y el margen que eligió la persona.
+model CotizacionCantidad {
+  id            Int        @id @default(autoincrement())
+  cotizacionId  Int
+  cotizacion    Cotizacion @relation(fields: [cotizacionId], references: [id], onDelete: Cascade)
+  orden         Int
+  cantidad      Int
+  cifPorcentaje Decimal    @db.Decimal(6, 4)
+
+  subtotal       Decimal @db.Decimal(14, 4)
+  administracion Decimal @db.Decimal(14, 4)
+  cif            Decimal @db.Decimal(14, 4)
+  costoTotal     Decimal @db.Decimal(14, 4)
+  diasRequeridos Decimal @db.Decimal(8, 2)
+
+  margenElegidoOrden Int? // qué opción de margen escogió la persona
+  precioUnitario     Decimal? @db.Decimal(14, 2) // precio final enviado al cliente (sin IVA)
+
+  @@unique([cotizacionId, orden])
+}
+
+/// Foto o diseño del producto que va en el PDF para el cliente (una por cotización). Tabla aparte para no
+/// cargar los bytes al listar cotizaciones.
+model ImagenCotizacion {
+  id           Int        @id @default(autoincrement())
+  cotizacionId Int        @unique
+  cotizacion   Cotizacion @relation(fields: [cotizacionId], references: [id], onDelete: Cascade)
+  tipo         String // image/jpeg o image/png (los formatos que acepta el PDF)
+  nombre       String?
+  datos        Bytes
+  subidaEn     DateTime   @default(now())
+}
+
+model CambioEstado {
+  id           Int               @id @default(autoincrement())
+  cotizacionId Int
+  cotizacion   Cotizacion        @relation(fields: [cotizacionId], references: [id], onDelete: Cascade)
+  desde        EstadoCotizacion?
+  hacia        EstadoCotizacion
+  nota         String?
+  fecha        DateTime          @default(now())
+  usuarioId    Int?
+  usuario      Usuario?          @relation(fields: [usuarioId], references: [id], onDelete: SetNull)
+
+  @@index([cotizacionId])
+}
+
+// ───────────────────────────── Enums ─────────────────────────────
+
+enum EstadoCotizacion {
+  BORRADOR
+  ENVIADA
+  APROBADA
+  RECHAZADA
+  EN_PRUEBAS // clisé y muestras para el cliente
+  EN_PRODUCCION
+  TERMINADA
+  CANCELADA
+  HISTORICA // importada del Excel, sin estado conocido
+}
+
+enum Rol {
+  ADMIN
+  OPERARIO
+}
+
+enum OrigenCotizacion {
+  SISTEMA
+  EXCEL
+}
+
+enum FuenteTiempo {
+  OPERARIA
+  SUGERENCIA_ACEPTADA
+  SUGERENCIA_CORREGIDA
+}
+
+enum TipoCorte {
+  BISTURI
+  TROQUELADO
+}
+
+enum BaseCalculo {
+  PRIMERA_FILA
+  PROPIA_FILA
+}
+
+enum SeccionConcepto {
+  TROQUEL
+  CLISE
+  TROQUELADA
+  MATERIAL
+  ARMADA
+  EMPAQUE
+  OTROS
+  ADICIONAL
+}
+
+enum TipoCosto {
+  POR_UNIDAD
+  FIJO
+}
+
+enum ClaveParametro {
+  VALOR_MINUTO
+  HORAS_POR_DIA
+  PRECIO_CM2_CLISE
+  PRECIO_GRAMO
+}

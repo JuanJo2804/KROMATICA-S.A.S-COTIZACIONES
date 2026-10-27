@@ -1,0 +1,18 @@
+{
+  "name": "kromatica-cotizaciones",
+  "private": true,
+  "license": "MIT",
+  "author": "Juan José Ocampo Ramírez",
+  "description": "Sistema de cotizaciones de Kromatica: motor de cálculo, API y web",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm --filter @kromatica/motor-calculo build && pnpm --filter @kromatica/api build && pnpm --filter @kromatica/web build",
+    "test": "pnpm -r test",
+    "dev:api": "pnpm --filter @kromatica/motor-calculo build && pnpm --filter @kromatica/api start:dev",
+    "db:up": "docker compose up -d db",
+    "dev:web": "pnpm --filter @kromatica/motor-calculo build && pnpm --filter @kromatica/web dev"
+  }
+}

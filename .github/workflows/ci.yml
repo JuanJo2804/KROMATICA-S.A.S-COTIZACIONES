@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pruebas:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: cotiz
+          POSTGRES_PASSWORD: cotiz
+          POSTGRES_DB: cotizaciones
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cotiz" --health-interval 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://cotiz:cotiz@localhost:5432/cotizaciones
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @kromatica/motor-calculo build
+      - run: pnpm test
+      - run: pnpm --filter @kromatica/api build
+      - name: Migrar, cargar datos y probar de punta a punta
+        working-directory: apps/api
+        run: |
+          pnpm db:deploy
+          pnpm db:seed
+          pnpm test:e2e
